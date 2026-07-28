@@ -1,0 +1,10 @@
+{
+    "manager": "browser",
+    "ui": {
+        "showPill": true
+    },
+    "gopeed": {
+        "host": "http://127.0.0.1:9999",
+        "token": ""
+    }
+}
