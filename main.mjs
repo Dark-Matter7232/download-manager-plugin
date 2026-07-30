@@ -407,9 +407,39 @@ async function isDownloadUrl(url) {
 class GopeedDownloadManager {
     constructor(config) {
         this.config = config;
+        this.usedDeepLinkFallback = false;
+    }
+
+    isLocalHost() {
+        try {
+            const parsed = new URL(normalizeHost(this.config.host));
+            const hostname = parsed.hostname.toLowerCase();
+            return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]";
+        } catch {
+            return false;
+        }
+    }
+
+    createDeepLink(url, headers, filename) {
+        const cleanHeaders = {};
+        if (headers && typeof headers === "object") {
+            for (const [key, val] of Object.entries(headers)) {
+                if (typeof val === "string" && val.trim().length > 0) {
+                    cleanHeaders[key] = val.trim();
+                }
+            }
+        }
+
+        const extra = Object.keys(cleanHeaders).length > 0 ? { header: cleanHeaders } : undefined;
+        const req = { url, extra };
+        const opts = filename ? { name: filename } : {};
+        const payload = { req, opts, opt: opts };
+        const encodedParams = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
+        return `gopeed:///create?params=${encodeURIComponent(encodedParams)}`;
     }
 
     async bringToFront() {
+        if (this.usedDeepLinkFallback) return;
         try {
             await shell.openExternal("gopeed://");
         } catch {
@@ -432,7 +462,7 @@ class GopeedDownloadManager {
         return response.json();
     }
 
-    async createTask(url, headers, filename) {
+    async postTaskApi(url, headers, filename) {
         const host = normalizeHost(this.config.host);
         const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
 
@@ -440,38 +470,27 @@ class GopeedDownloadManager {
         if (headers && typeof headers === "object") {
             for (const [key, val] of Object.entries(headers)) {
                 if (typeof val === "string" && val.trim().length > 0) {
-                    cleanHeaders[key] = val;
+                    cleanHeaders[key] = val.trim();
                 }
             }
         }
 
         const req = {
             url,
-            extra: Object.keys(cleanHeaders).length > 0 ? { header: cleanHeaders } : {},
-            labels: { source: "legcord" },
+            ...(Object.keys(cleanHeaders).length > 0 ? { extra: { header: cleanHeaders } } : {}),
         };
         const opts = filename ? { name: filename } : {};
         const body = { req, opts, opt: opts };
 
-        let response;
-        try {
-            response = await fetch(`${host}/api/v1/tasks`, {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    ...(token ? { "X-Api-Token": token } : {}),
-                },
-                body: JSON.stringify(body),
-                signal: AbortSignal.timeout(8_000),
-            });
-        } catch (networkError) {
-            if (networkError.name === "TimeoutError" || networkError.name === "AbortError") {
-                throw new Error(`Connection to Gopeed API timed out at ${host}`);
-            }
-            throw new Error(
-                `Failed to connect to Gopeed REST API at ${host}. Make sure Gopeed is running and its API server is enabled.`,
-            );
-        }
+        const response = await fetch(`${host}/api/v1/tasks`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                ...(token ? { "X-Api-Token": token } : {}),
+            },
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(8_000),
+        });
 
         const bodyText = await response.text();
         if (!response.ok) {
@@ -481,6 +500,36 @@ class GopeedDownloadManager {
         const json = JSON.parse(bodyText);
         if (json?.code !== 0) {
             throw new Error(json?.msg ?? json?.message ?? "Unknown Gopeed API error");
+        }
+    }
+
+    async createTask(url, headers, filename) {
+        this.usedDeepLinkFallback = false;
+
+        try {
+            await this.postTaskApi(url, headers, filename);
+            return;
+        } catch (apiError) {
+            if (this.isLocalHost()) {
+                try {
+                    await shell.openExternal("gopeed://");
+                } catch {
+                    // Ignore foreground / launch errors
+                }
+
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+
+                try {
+                    await this.postTaskApi(url, headers, filename);
+                    return;
+                } catch {
+                    this.usedDeepLinkFallback = true;
+                    const deepLink = this.createDeepLink(url, headers, filename);
+                    await shell.openExternal(deepLink);
+                    return;
+                }
+            }
+            throw apiError;
         }
     }
 }
