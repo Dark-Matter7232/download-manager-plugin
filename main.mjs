@@ -95,10 +95,22 @@ function ensureConfig(app, logger) {
     return storageConfigPath;
 }
 
+let configCache = null;
+let configCacheTime = 0;
+const CONFIG_CACHE_TTL_MS = 1000;
+
 function readConfig(app, logger) {
+    const now = Date.now();
+    if (configCache && now - configCacheTime < CONFIG_CACHE_TTL_MS) {
+        return configCache;
+    }
+
     const storageConfigPath = ensureConfig(app, logger);
     try {
-        return normalizeConfig(readJson(storageConfigPath));
+        const config = normalizeConfig(readJson(storageConfigPath));
+        configCache = config;
+        configCacheTime = now;
+        return config;
     } catch (error) {
         logger.error("Failed to read config.json, using defaults", error);
         return structuredClone(DEFAULT_CONFIG);
@@ -125,6 +137,18 @@ function isHttpUrl(url) {
     return typeof url === "string" && /^https?:\/\//i.test(url);
 }
 
+const requestHeadersCache = new Map();
+
+function trackRequestHeaders(url, headers) {
+    if (url && headers) {
+        requestHeadersCache.set(url, headers);
+        if (requestHeadersCache.size > 512) {
+            const oldest = requestHeadersCache.keys().next().value;
+            if (oldest) requestHeadersCache.delete(oldest);
+        }
+    }
+}
+
 async function buildDownloadRequestHeaders(window, url) {
     const headers = {};
     const webContents = window?.webContents;
@@ -144,6 +168,16 @@ async function buildDownloadRequestHeaders(window, url) {
         }
     } catch {
         // Ignore Referer collection failures.
+    }
+
+    // Merge live captured request headers if available
+    const tracked = requestHeadersCache.get(url);
+    if (tracked) {
+        for (const [key, val] of Object.entries(tracked)) {
+            if (typeof val === "string" && val.length > 0 && !headers[key]) {
+                headers[key] = val;
+            }
+        }
     }
 
     try {
@@ -276,78 +310,98 @@ function isDownloadUrlSync(url) {
     }
 }
 
+const downloadDecisionCache = new Map();
+const DECISION_CACHE_TTL_MS = 5 * 60 * 1000;
+
 async function isDownloadUrl(url) {
     if (isDownloadUrlSync(url)) {
         return true;
     }
 
-    try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 3000);
+    const now = Date.now();
+    const cached = downloadDecisionCache.get(url);
+    if (cached && now - cached.timestamp < DECISION_CACHE_TTL_MS) {
+        return cached.result;
+    }
 
-        let response;
+    const evaluate = async () => {
         try {
-            response = await fetch(url, {
-                method: "HEAD",
-                redirect: "follow",
-                signal: controller.signal,
-            });
-        } catch {
-            const getController = new AbortController();
-            const getTimeoutId = setTimeout(() => getController.abort(), 3000);
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+            let response;
             try {
                 response = await fetch(url, {
-                    method: "GET",
-                    headers: { Range: "bytes=0-0" },
+                    method: "HEAD",
                     redirect: "follow",
-                    signal: getController.signal,
+                    signal: controller.signal,
                 });
+            } catch {
+                const getController = new AbortController();
+                const getTimeoutId = setTimeout(() => getController.abort(), 3000);
+                try {
+                    response = await fetch(url, {
+                        method: "GET",
+                        headers: { Range: "bytes=0-0" },
+                        redirect: "follow",
+                        signal: getController.signal,
+                    });
+                } finally {
+                    clearTimeout(getTimeoutId);
+                }
             } finally {
-                clearTimeout(getTimeoutId);
+                clearTimeout(timeoutId);
             }
-        } finally {
-            clearTimeout(timeoutId);
-        }
 
-        if (!response || (!response.ok && response.status !== 206)) {
+            if (!response || (!response.ok && response.status !== 206)) {
+                return false;
+            }
+
+            if (response.url && response.url !== url) {
+                if (isDownloadUrlSync(response.url)) {
+                    return true;
+                }
+            }
+
+            const contentDisposition = response.headers.get("content-disposition") || "";
+            if (/attachment/i.test(contentDisposition) || /filename=/i.test(contentDisposition)) {
+                return true;
+            }
+
+            const contentTypeHeader = response.headers.get("content-type") || "";
+            const contentType = contentTypeHeader.toLowerCase().split(";")[0].trim();
+
+            if (contentType) {
+                const webPageTypes = [
+                    "text/html",
+                    "application/xhtml+xml",
+                    "application/json",
+                    "text/css",
+                    "text/javascript",
+                    "application/javascript",
+                    "text/plain",
+                    "image/svg+xml",
+                ];
+
+                if (!webPageTypes.includes(contentType)) {
+                    return true;
+                }
+            }
+
+            return false;
+        } catch {
             return false;
         }
+    };
 
-        if (response.url && response.url !== url) {
-            if (isDownloadUrlSync(response.url)) {
-                return true;
-            }
-        }
-
-        const contentDisposition = response.headers.get("content-disposition") || "";
-        if (/attachment/i.test(contentDisposition) || /filename=/i.test(contentDisposition)) {
-            return true;
-        }
-
-        const contentTypeHeader = response.headers.get("content-type") || "";
-        const contentType = contentTypeHeader.toLowerCase().split(";")[0].trim();
-
-        if (contentType) {
-            const webPageTypes = [
-                "text/html",
-                "application/xhtml+xml",
-                "application/json",
-                "text/css",
-                "text/javascript",
-                "application/javascript",
-                "text/plain",
-                "image/svg+xml",
-            ];
-
-            if (!webPageTypes.includes(contentType)) {
-                return true;
-            }
-        }
-
-        return false;
-    } catch {
-        return false;
+    const result = await evaluate();
+    downloadDecisionCache.set(url, { result, timestamp: now });
+    if (downloadDecisionCache.size > 512) {
+        const oldest = downloadDecisionCache.keys().next().value;
+        if (oldest) downloadDecisionCache.delete(oldest);
     }
+
+    return result;
 }
 
 class GopeedDownloadManager {
@@ -580,12 +634,23 @@ export function activate(api) {
                 })();
             };
 
+            try {
+                session.webRequest.onBeforeSendHeaders({ urls: ["http://*/*", "https://*/*"] }, (details, callback) => {
+                    if (details.url && details.requestHeaders) {
+                        trackRequestHeaders(details.url, details.requestHeaders);
+                    }
+                    callback({ cancel: false, requestHeaders: details.requestHeaders });
+                });
+            } catch {
+                // Best-effort webRequest header tracking
+            }
+
             session.on("will-download", downloadListener);
             sessionListeners.set(session, downloadListener);
         }
 
         if (!webContentsListeners.has(webContents)) {
-            const navigateListener = (event, url) => {
+            const handleNavOrRedirect = (event, url, sourceName) => {
                 if (!isHttpUrl(url)) return;
 
                 const config = readConfig(api.electron.app, api.logger);
@@ -617,9 +682,9 @@ export function activate(api) {
                         }
 
                         await manager.bringToFront();
-                        api.logger.log(`Queued navigated download through ${config.manager}:`, url);
+                        api.logger.log(`Queued ${sourceName} download through ${config.manager}:`, url);
                     } catch (error) {
-                        api.logger.error("Failed to queue navigated download, falling back to browser", error);
+                        api.logger.error(`Failed to queue ${sourceName} download, falling back to browser`, error);
                         try {
                             await originalOpenExternal(url);
                         } catch (shellError) {
@@ -629,8 +694,50 @@ export function activate(api) {
                 })();
             };
 
+            const navigateListener = (event, url) => handleNavOrRedirect(event, url, "navigated");
+            const redirectListener = (event, url) => handleNavOrRedirect(event, url, "redirected");
+
+            try {
+                webContents.setWindowOpenHandler(({ url }) => {
+                    if (isHttpUrl(url)) {
+                        const config = readConfig(api.electron.app, api.logger);
+                        if (config.manager !== "browser" && isDownloadUrlSync(url)) {
+                            void (async () => {
+                                try {
+                                    const manager = createManager(config);
+                                    if (manager) {
+                                        const headers = await buildDownloadRequestHeaders(window, url);
+                                        const filename = extractFilenameFromUrl(url);
+                                        if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
+                                            await originalOpenExternal(manager.createDeepLink(url, headers, filename));
+                                        } else {
+                                            await manager.createTask(url, headers, filename);
+                                        }
+                                        await manager.bringToFront();
+                                        api.logger.log(`Queued window.open download through ${config.manager}:`, url);
+                                        return;
+                                    }
+                                } catch (error) {
+                                    api.logger.error("Failed to queue window.open download", error);
+                                }
+                                try {
+                                    await originalOpenExternal(url);
+                                } catch (shellError) {
+                                    api.logger.error("Fallback window.open openExternal failed", shellError);
+                                }
+                            })();
+                            return { action: "deny" };
+                        }
+                    }
+                    return { action: "allow" };
+                });
+            } catch {
+                // Best-effort setWindowOpenHandler
+            }
+
             webContents.on("will-navigate", navigateListener);
-            webContentsListeners.set(webContents, navigateListener);
+            webContents.on("will-redirect", redirectListener);
+            webContentsListeners.set(webContents, { navigateListener, redirectListener });
             webContents.once("destroyed", () => {
                 webContentsListeners.delete(webContents);
             });
@@ -704,12 +811,16 @@ export function activate(api) {
             session.off("will-download", listener);
         }
         sessionListeners.clear();
-        for (const [webContents, listener] of webContentsListeners) {
+        for (const [webContents, listeners] of webContentsListeners) {
             if (!webContents.isDestroyed()) {
-                webContents.off("will-navigate", listener);
+                if (listeners?.navigateListener) webContents.off("will-navigate", listeners.navigateListener);
+                if (listeners?.redirectListener) webContents.off("will-redirect", listeners.redirectListener);
             }
         }
         webContentsListeners.clear();
+        requestHeadersCache.clear();
+        downloadDecisionCache.clear();
+        configCache = null;
     });
 }
 
