@@ -345,7 +345,7 @@ function renderModal(config, onClose) {
                         <input type="radio" name="dm-manager" value="gopeed" ${config.manager === "gopeed" ? "checked" : ""}>
                         Gopeed
                     </label>
-                    <div class="dm-choice-note">Queues downloads through the Gopeed API or local deep link when available.</div>
+                    <div class="dm-choice-note">Queues downloads through the Gopeed REST API.</div>
                     <div class="dm-fields" data-gopeed-fields>
                         <div class="dm-field">
                             <label for="dm-gopeed-host">Gopeed API host</label>

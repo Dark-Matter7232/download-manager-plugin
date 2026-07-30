@@ -409,24 +409,6 @@ class GopeedDownloadManager {
         this.config = config;
     }
 
-    canUseDeepLink() {
-        try {
-            const parsed = new URL(normalizeHost(this.config.host));
-            const hostname = parsed.hostname.toLowerCase();
-            return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]";
-        } catch {
-            return false;
-        }
-    }
-
-    createDeepLink(url, headers, filename) {
-        const extra = {};
-        if (headers && Object.keys(headers).length > 0) extra.header = headers;
-        const payload = filename ? { req: { url, extra }, opts: { name: filename } } : { req: { url, extra } };
-        const encodedParams = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
-        return `gopeed:///create?params=${encodeURIComponent(encodedParams)}`;
-    }
-
     async bringToFront() {
         try {
             await shell.openExternal("gopeed://");
@@ -435,22 +417,61 @@ class GopeedDownloadManager {
         }
     }
 
+    async getInfo() {
+        const host = normalizeHost(this.config.host);
+        const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
+        const response = await fetch(`${host}/api/v1/info`, {
+            method: "GET",
+            headers: token ? { "X-Api-Token": token } : {},
+            signal: AbortSignal.timeout(4_000),
+        });
+
+        if (!response.ok) {
+            throw new Error(`Gopeed API returned HTTP ${response.status}`);
+        }
+        return response.json();
+    }
+
     async createTask(url, headers, filename) {
         const host = normalizeHost(this.config.host);
         const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
-        const response = await fetch(`${host}/api/v1/tasks`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                ...(token ? { "X-Api-Token": token } : {}),
-            },
-            body: JSON.stringify(
-                filename
-                    ? { req: { url, extra: { header: headers } }, opts: { name: filename } }
-                    : { req: { url, extra: { header: headers } } },
-            ),
-            signal: AbortSignal.timeout(8_000),
-        });
+
+        const cleanHeaders = {};
+        if (headers && typeof headers === "object") {
+            for (const [key, val] of Object.entries(headers)) {
+                if (typeof val === "string" && val.trim().length > 0) {
+                    cleanHeaders[key] = val;
+                }
+            }
+        }
+
+        const req = {
+            url,
+            extra: Object.keys(cleanHeaders).length > 0 ? { header: cleanHeaders } : {},
+            labels: { source: "legcord" },
+        };
+        const opts = filename ? { name: filename } : {};
+        const body = { req, opts, opt: opts };
+
+        let response;
+        try {
+            response = await fetch(`${host}/api/v1/tasks`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    ...(token ? { "X-Api-Token": token } : {}),
+                },
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(8_000),
+            });
+        } catch (networkError) {
+            if (networkError.name === "TimeoutError" || networkError.name === "AbortError") {
+                throw new Error(`Connection to Gopeed API timed out at ${host}`);
+            }
+            throw new Error(
+                `Failed to connect to Gopeed REST API at ${host}. Make sure Gopeed is running and its API server is enabled.`,
+            );
+        }
 
         const bodyText = await response.text();
         if (!response.ok) {
@@ -606,11 +627,7 @@ export function activate(api) {
                             window;
                         const headers = await buildDownloadRequestHeaders(ownerWindow, sourceUrl);
 
-                        if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
-                            await originalOpenExternal(manager.createDeepLink(sourceUrl, headers, item.getFilename()));
-                        } else {
-                            await manager.createTask(sourceUrl, headers, item.getFilename());
-                        }
+                        await manager.createTask(sourceUrl, headers, item.getFilename());
 
                         await manager.bringToFront();
                         api.logger.log(`Queued download through ${config.manager}:`, sourceUrl);
@@ -675,11 +692,7 @@ export function activate(api) {
                         const headers = await buildDownloadRequestHeaders(ownerWindow, url);
                         const filename = extractFilenameFromUrl(url);
 
-                        if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
-                            await originalOpenExternal(manager.createDeepLink(url, headers, filename));
-                        } else {
-                            await manager.createTask(url, headers, filename);
-                        }
+                        await manager.createTask(url, headers, filename);
 
                         await manager.bringToFront();
                         api.logger.log(`Queued ${sourceName} download through ${config.manager}:`, url);
@@ -708,11 +721,7 @@ export function activate(api) {
                                     if (manager) {
                                         const headers = await buildDownloadRequestHeaders(window, url);
                                         const filename = extractFilenameFromUrl(url);
-                                        if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
-                                            await originalOpenExternal(manager.createDeepLink(url, headers, filename));
-                                        } else {
-                                            await manager.createTask(url, headers, filename);
-                                        }
+                                        await manager.createTask(url, headers, filename);
                                         await manager.bringToFront();
                                         api.logger.log(`Queued window.open download through ${config.manager}:`, url);
                                         return;
@@ -772,11 +781,7 @@ export function activate(api) {
                     const headers = await buildDownloadRequestHeaders(focusedWindow, url);
                     const filename = extractFilenameFromUrl(url);
 
-                    if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
-                        await original(manager.createDeepLink(url, headers, filename));
-                    } else {
-                        await manager.createTask(url, headers, filename);
-                    }
+                    await manager.createTask(url, headers, filename);
 
                     await manager.bringToFront();
                     api.logger.log(`Queued openExternal download through ${config.manager}:`, url);
