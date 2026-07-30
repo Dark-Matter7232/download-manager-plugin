@@ -7,7 +7,10 @@ Author: [Anurag Rai (Dark-Matter7232)](https://github.com/Dark-Matter7232)
 ## Features
 
 - Routes downloads through Browser, Gopeed, or IDM
-- Captures Discord download headers and cookies when available
+- Intercepts universal download links dynamically across Discord chat, external link clicks, `window.open`, and redirects
+- Uses fast-path URL heuristics and dynamic HTTP pre-flight header inspection (`Content-Disposition`, binary `Content-Type`)
+- Captures live request headers, cookies, referer, and user-agent for protected downloads
+- Caches download decisions and configuration in memory to minimize latency and disk I/O
 - Displays the selected backend in the Download Manager pill
 - Shows the configuration pill automatically on fresh installs
 - Lets users hide the pill after configuration
@@ -33,6 +36,33 @@ Author: [Anurag Rai (Dark-Matter7232)](https://github.com/Dark-Matter7232)
 5. Open `Settings -> Plugins`.
 6. Enable `Download Manager Plugin`.
 7. Restart Legcord if the Plugins section or Download Manager pill does not appear.
+
+## Interception & Architecture
+
+The plugin uses a multi-layered Electron event interception architecture to capture downloads without letting them escape to the web browser:
+
+1. **Native Session Stream Interception (`session.on('will-download')`)**: Intercepts native Chromium downloads triggered by attachments or direct file responses.
+2. **Main Frame Navigation Interception (`webContents.on('will-navigate')`)**: Intercepts direct link navigations.
+3. **Redirect Chain Interception (`webContents.on('will-redirect')`)**: Catches HTTP 301/302/307 redirects pointing to file downloads.
+4. **Window Open Interception (`webContents.setWindowOpenHandler`)**: Captures downloads launched via `<a target="_blank">` or JavaScript `window.open()`.
+5. **Shell External Interception (`shell.openExternal` patch)**: Intercepts external link clicks originating from Discord's UI.
+6. **Request Header Harvesting (`session.webRequest.onBeforeSendHeaders`)**: Tracks live request headers, authorization tokens, and cookies to ensure external download managers receive complete context.
+
+Links are evaluated using fast static extension matching and query parameters first. For ambiguous links without clear extensions, a lightweight async pre-flight HEAD/GET inspection evaluates server response headers (`Content-Disposition: attachment` or binary MIME type) before deciding whether to route to Gopeed/IDM or open the browser. Results are cached in memory using a 5-minute LRU cache.
+
+## Intercepted File Extensions
+
+The plugin automatically detects and intercepts the following file extensions:
+
+- **Archives & Compressed**: `.zip`, `.rar`, `.7z`, `.tar`, `.gz`, `.tgz`, `.bz2`, `.tbz2`, `.xz`, `.txz`, `.zst`, `.tzst`, `.iso`, `.cab`, `.dmg`, `.img`, `.vhd`, `.vhdx`, `.wim`, `.lzh`, `.lha`, `.arj`, `.ace`, `.uue`, `.bz`, `.lz`, `.lzma`, `.lzo`, `.rz`, `.sz`, `.z`, `.7z.001`, `.zip.001`, `.rar.001`, `.part1.rar`
+- **Executables & Installers**: `.exe`, `.msi`, `.pkg`, `.deb`, `.rpm`, `.appimage`, `.apk`, `.xapk`, `.apks`, `.ipa`, `.jar`, `.bin`, `.run`, `.msix`, `.appx`, `.appxbundle`, `.msixbundle`, `.gadget`, `.bat`, `.cmd`, `.ps1`, `.vbs`, `.sh`, `.command`
+- **Documents & E-books**: `.pdf`, `.epub`, `.mobi`, `.azw`, `.azw3`, `.djvu`
+- **Audio Files**: `.mp3`, `.flac`, `.wav`, `.aac`, `.ogg`, `.m4a`, `.wma`, `.opus`, `.aiff`, `.alac`, `.mid`, `.midi`
+- **Video Files**: `.mp4`, `.mkv`, `.avi`, `.mov`, `.wmv`, `.webm`, `.flv`, `.m4v`, `.ts`, `.mts`, `.m2ts`, `.vob`, `.3gp`
+- **Disk Images & Game/ROM Data**: `.nrg`, `.cdi`, `.cue`, `.gcm`, `.xci`, `.nsp`, `.chd`, `.vpk`, `.pak`, `.wad`
+- **Torrent & Patches**: `.torrent`, `.patch`, `.diff`
+
+In addition, any URL containing download query parameters (`?download=1`, `?dl=1`, `?attachment=1`, `?export=download`, `?response-content-disposition`) or download paths (`/releases/download/`, `/file-download/`, `/attachments/`) is automatically intercepted regardless of file extension.
 
 ## First-Time Setup
 
