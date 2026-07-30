@@ -447,21 +447,6 @@ class GopeedDownloadManager {
         }
     }
 
-    async getInfo() {
-        const host = normalizeHost(this.config.host);
-        const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
-        const response = await fetch(`${host}/api/v1/info`, {
-            method: "GET",
-            headers: token ? { "X-Api-Token": token } : {},
-            signal: AbortSignal.timeout(4_000),
-        });
-
-        if (!response.ok) {
-            throw new Error(`Gopeed API returned HTTP ${response.status}`);
-        }
-        return response.json();
-    }
-
     async postTaskApi(url, headers, filename) {
         const host = normalizeHost(this.config.host);
         const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
