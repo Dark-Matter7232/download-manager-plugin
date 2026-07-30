@@ -1,7 +1,7 @@
 {
     "id": "download-manager-plugin",
     "name": "Download Manager Plugin",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "description": "Routes Legcord downloads to Gopeed or Internet Download Manager using the native plugin system.",
     "author": "Anurag Rai (Dark-Matter7232)",
     "compatibleVersions": ["1.3.x"],
