@@ -159,7 +159,34 @@ async function buildDownloadRequestHeaders(window, url) {
 }
 
 const DISCORD_DOWNLOAD_HOSTS = new Set(["cdn.discordapp.com", "cdn.discordapp.net", "media.discordapp.net"]);
-const DOWNLOAD_FILENAME_QUERY_KEYS = ["filename", "file", "name"];
+const DOWNLOAD_FILENAME_QUERY_KEYS = ["filename", "file", "name", "attachment"];
+
+const DOWNLOAD_EXTENSIONS = new Set([
+    // Archives & Compressed Files
+    "zip", "rar", "7z", "tar", "gz", "tgz", "bz2", "tbz2", "xz", "txz", "zst", "tzst",
+    "iso", "cab", "dmg", "img", "vhd", "vhdx", "wim", "lzh", "lha", "arj", "ace", "uue",
+    "bz", "lz", "lzma", "lzo", "rz", "sz", "z", "7z.001", "zip.001", "rar.001", "part1.rar",
+
+    // Executables, Installers & Packages
+    "exe", "msi", "pkg", "deb", "rpm", "appimage", "apk", "xapk", "apks", "ipa", "jar",
+    "bin", "run", "msix", "appx", "appxbundle", "msixbundle", "gadget", "bat", "cmd",
+    "ps1", "vbs", "sh", "command",
+
+    // Documents & E-books
+    "pdf", "epub", "mobi", "azw", "azw3", "djvu",
+
+    // Audio Files
+    "mp3", "flac", "wav", "aac", "ogg", "m4a", "wma", "opus", "aiff", "alac", "mid", "midi",
+
+    // Video Files
+    "mp4", "mkv", "avi", "mov", "wmv", "webm", "flv", "m4v", "ts", "mts", "m2ts", "vob", "3gp",
+
+    // Disk Images & Game/ROM Data
+    "nrg", "cdi", "cue", "gcm", "xci", "nsp", "chd", "vpk", "pak", "wad",
+
+    // Torrent & Hash/Patch Files
+    "torrent", "patch", "diff"
+]);
 
 function getRelevantQueryFilename(searchParams) {
     for (const key of DOWNLOAD_FILENAME_QUERY_KEYS) {
@@ -171,22 +198,150 @@ function getRelevantQueryFilename(searchParams) {
     return "";
 }
 
-function computeRouteDecision(url) {
+function extractFilenameFromUrl(url) {
+    try {
+        const parsed = new URL(url);
+        const pathname = parsed.pathname;
+        const filename = pathname.split("/").pop();
+        if (filename && filename.includes(".")) {
+            return decodeURIComponent(filename);
+        }
+        const queryFilename = getRelevantQueryFilename(parsed.searchParams);
+        if (queryFilename) {
+            return decodeURIComponent(queryFilename);
+        }
+    } catch {
+        // Ignore extraction errors.
+    }
+    return "";
+}
+
+function isDownloadUrlSync(url) {
     try {
         const parsed = new URL(url);
         const hostname = parsed.hostname.toLowerCase();
-        const lowerPath = parsed.pathname.toLowerCase();
+        const pathname = parsed.pathname;
+        const lowerPath = pathname.toLowerCase();
 
         if (lowerPath.includes("/attachments/") || DISCORD_DOWNLOAD_HOSTS.has(hostname)) {
             return true;
         }
 
+        const filename = pathname.split("/").pop() || "";
+        if (filename.includes(".")) {
+            const ext = filename.split(".").pop().toLowerCase();
+            if (DOWNLOAD_EXTENSIONS.has(ext)) {
+                return true;
+            }
+        }
+
+        const searchParams = parsed.searchParams;
         if (
-            parsed.searchParams.has("download") ||
-            parsed.searchParams.has("response-content-disposition") ||
-            getRelevantQueryFilename(parsed.searchParams).length > 0
+            searchParams.has("download") ||
+            searchParams.has("response-content-disposition") ||
+            searchParams.has("attachment") ||
+            searchParams.get("dl") === "1" ||
+            searchParams.get("export") === "download" ||
+            searchParams.get("action") === "download"
         ) {
             return true;
+        }
+
+        const queryFilename = getRelevantQueryFilename(searchParams);
+        if (queryFilename) {
+            if (queryFilename.includes(".")) {
+                const queryExt = queryFilename.split(".").pop().toLowerCase();
+                if (DOWNLOAD_EXTENSIONS.has(queryExt)) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+
+        if (
+            (lowerPath.includes("/releases/download/") ||
+                lowerPath.includes("/file-download/") ||
+                lowerPath.includes("/get-download/")) &&
+            filename.length > 0 &&
+            filename !== "download" &&
+            filename !== "downloads"
+        ) {
+            return true;
+        }
+
+        return false;
+    } catch {
+        return false;
+    }
+}
+
+async function isDownloadUrl(url) {
+    if (isDownloadUrlSync(url)) {
+        return true;
+    }
+
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+        let response;
+        try {
+            response = await fetch(url, {
+                method: "HEAD",
+                redirect: "follow",
+                signal: controller.signal,
+            });
+        } catch {
+            const getController = new AbortController();
+            const getTimeoutId = setTimeout(() => getController.abort(), 3000);
+            try {
+                response = await fetch(url, {
+                    method: "GET",
+                    headers: { Range: "bytes=0-0" },
+                    redirect: "follow",
+                    signal: getController.signal,
+                });
+            } finally {
+                clearTimeout(getTimeoutId);
+            }
+        } finally {
+            clearTimeout(timeoutId);
+        }
+
+        if (!response || (!response.ok && response.status !== 206)) {
+            return false;
+        }
+
+        if (response.url && response.url !== url) {
+            if (isDownloadUrlSync(response.url)) {
+                return true;
+            }
+        }
+
+        const contentDisposition = response.headers.get("content-disposition") || "";
+        if (/attachment/i.test(contentDisposition) || /filename=/i.test(contentDisposition)) {
+            return true;
+        }
+
+        const contentTypeHeader = response.headers.get("content-type") || "";
+        const contentType = contentTypeHeader.toLowerCase().split(";")[0].trim();
+
+        if (contentType) {
+            const webPageTypes = [
+                "text/html",
+                "application/xhtml+xml",
+                "application/json",
+                "text/css",
+                "text/javascript",
+                "application/javascript",
+                "text/plain",
+                "image/svg+xml",
+            ];
+
+            if (!webPageTypes.includes(contentType)) {
+                return true;
+            }
         }
 
         return false;
@@ -436,7 +591,7 @@ export function activate(api) {
                 const config = readConfig(api.electron.app, api.logger);
                 if (config.manager === "browser") return;
 
-                if (!computeRouteDecision(url)) return;
+                if (!isDownloadUrlSync(url)) return;
 
                 event.preventDefault();
 
@@ -453,11 +608,12 @@ export function activate(api) {
                             api.electron.BrowserWindow.getFocusedWindow() ??
                             window;
                         const headers = await buildDownloadRequestHeaders(ownerWindow, url);
+                        const filename = extractFilenameFromUrl(url);
 
                         if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
-                            await originalOpenExternal(manager.createDeepLink(url, headers));
+                            await originalOpenExternal(manager.createDeepLink(url, headers, filename));
                         } else {
-                            await manager.createTask(url, headers);
+                            await manager.createTask(url, headers, filename);
                         }
 
                         await manager.bringToFront();
@@ -481,7 +637,7 @@ export function activate(api) {
         }
     };
 
-    const unpatchShell = api.patcher.instead("openExternal", api.electron.shell, (args, original) => {
+    const unpatchShell = api.patcher.instead("openExternal", api.electron.shell, async (args, original) => {
         const url = args[0];
 
         if (bypassUrls.has(url)) {
@@ -490,36 +646,43 @@ export function activate(api) {
         }
 
         const config = readConfig(api.electron.app, api.logger);
-        if (config.manager !== "browser" && isHttpUrl(url) && computeRouteDecision(url)) {
-            void (async () => {
+        if (config.manager !== "browser" && isHttpUrl(url)) {
+            let isDownload = false;
+            try {
+                isDownload = await isDownloadUrl(url);
+            } catch (error) {
+                api.logger.error("Failed to evaluate download URL", error);
+            }
+
+            if (isDownload) {
                 try {
                     const manager = createManager(config);
                     if (!manager) {
-                        await original(...args);
-                        return;
+                        return original(...args);
                     }
 
                     const focusedWindow = api.electron.BrowserWindow.getFocusedWindow();
                     const headers = await buildDownloadRequestHeaders(focusedWindow, url);
+                    const filename = extractFilenameFromUrl(url);
 
                     if (manager instanceof GopeedDownloadManager && manager.canUseDeepLink()) {
-                        await original(manager.createDeepLink(url, headers));
+                        await original(manager.createDeepLink(url, headers, filename));
                     } else {
-                        await manager.createTask(url, headers);
+                        await manager.createTask(url, headers, filename);
                     }
 
                     await manager.bringToFront();
                     api.logger.log(`Queued openExternal download through ${config.manager}:`, url);
+                    return Promise.resolve(true);
                 } catch (error) {
                     api.logger.error("Failed to queue openExternal download, falling back to browser", error);
                     try {
-                        await original(...args);
+                        return await original(...args);
                     } catch (shellError) {
                         api.logger.error("Fallback openExternal failed", shellError);
                     }
                 }
-            })();
-            return Promise.resolve(true);
+            }
         }
 
         return original(...args);
@@ -549,3 +712,6 @@ export function activate(api) {
         webContentsListeners.clear();
     });
 }
+
+export { isDownloadUrlSync, isDownloadUrl, extractFilenameFromUrl };
+
