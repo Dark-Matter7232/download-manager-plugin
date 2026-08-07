@@ -420,7 +420,7 @@ class GopeedDownloadManager {
         }
     }
 
-    createDeepLink(url, headers, filename) {
+    createDeepLink(url, headers) {
         const cleanHeaders = {};
         if (headers && typeof headers === "object") {
             for (const [key, val] of Object.entries(headers)) {
@@ -432,8 +432,7 @@ class GopeedDownloadManager {
 
         const extra = Object.keys(cleanHeaders).length > 0 ? { header: cleanHeaders } : undefined;
         const req = { url, extra };
-        const opts = filename ? { name: filename } : {};
-        const payload = { req, opts, opt: opts };
+        const payload = { req };
         const encodedParams = Buffer.from(JSON.stringify(payload), "utf8").toString("base64");
         return `gopeed:///create?params=${encodeURIComponent(encodedParams)}`;
     }
@@ -447,7 +446,7 @@ class GopeedDownloadManager {
         }
     }
 
-    async postTaskApi(url, headers, filename) {
+    async postTaskApi(url, headers) {
         const host = normalizeHost(this.config.host);
         const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
 
@@ -464,8 +463,7 @@ class GopeedDownloadManager {
             url,
             ...(Object.keys(cleanHeaders).length > 0 ? { extra: { header: cleanHeaders } } : {}),
         };
-        const opts = filename ? { name: filename } : {};
-        const body = { req, opts, opt: opts };
+        const body = { req };
 
         const response = await fetch(`${host}/api/v1/tasks`, {
             method: "POST",
@@ -492,7 +490,7 @@ class GopeedDownloadManager {
         this.usedDeepLinkFallback = false;
 
         try {
-            await this.postTaskApi(url, headers, filename);
+            await this.postTaskApi(url, headers);
             return;
         } catch (apiError) {
             if (this.isLocalHost()) {
@@ -505,11 +503,11 @@ class GopeedDownloadManager {
                 await new Promise((resolve) => setTimeout(resolve, 1200));
 
                 try {
-                    await this.postTaskApi(url, headers, filename);
+                    await this.postTaskApi(url, headers);
                     return;
                 } catch {
                     this.usedDeepLinkFallback = true;
-                    const deepLink = this.createDeepLink(url, headers, filename);
+                    const deepLink = this.createDeepLink(url, headers);
                     await shell.openExternal(deepLink);
                     return;
                 }
@@ -864,4 +862,3 @@ export function activate(api) {
 }
 
 export { isDownloadUrlSync, isDownloadUrl, extractFilenameFromUrl };
-
