@@ -18,13 +18,7 @@ const SETTINGS_WINDOW_URL = path.join(__dirname, "settings.html");
 const SETTINGS_PRELOAD_PATH = path.join(__dirname, "settings-preload.cjs");
 const scriptsDir = path.join(__dirname, "scripts");
 
-const DEFAULT_CONFIG = {
-    manager: "browser",
-    gopeed: {
-        host: "http://127.0.0.1:9999",
-        token: "",
-    },
-};
+const DEFAULT_CONFIG = { manager: "browser" };
 
 function getStorageConfigPath(app) {
     return path.join(app.getPath("userData"), "plugin-storage", PLUGIN_ID, "config.json");
@@ -42,9 +36,9 @@ function openSettingsWindow(BrowserWindow) {
 
     const window = new BrowserWindow({
         width: 520,
-        height: 590,
+        height: 540,
         minWidth: 460,
-        minHeight: 520,
+        minHeight: 460,
         title: "Download Manager Settings",
         show: false,
         autoHideMenuBar: true,
@@ -103,13 +97,6 @@ function writeJsonIfChanged(filePath, value) {
 function normalizeConfig(parsed) {
     return {
         manager: parsed?.manager === "gopeed" || parsed?.manager === "idm" ? parsed.manager : "browser",
-        gopeed: {
-            host:
-                typeof parsed?.gopeed?.host === "string" && parsed.gopeed.host.trim().length > 0
-                    ? parsed.gopeed.host
-                    : DEFAULT_CONFIG.gopeed.host,
-            token: typeof parsed?.gopeed?.token === "string" ? parsed.gopeed.token : "",
-        },
     };
 }
 
@@ -136,7 +123,11 @@ function readConfig(app, logger) {
 
     const storageConfigPath = ensureConfig(app, logger);
     try {
-        const config = normalizeConfig(readJson(storageConfigPath));
+        const storedConfig = readJson(storageConfigPath);
+        const config = normalizeConfig(storedConfig);
+        if (JSON.stringify(storedConfig) !== JSON.stringify(config)) {
+            writeJsonIfChanged(storageConfigPath, config);
+        }
         configCache = config;
         configCacheTime = now;
         return config;
@@ -150,13 +141,6 @@ function readConfig(app, logger) {
         }
         return defaults;
     }
-}
-
-function normalizeHost(host) {
-    const trimmed = typeof host === "string" ? host.trim() : "";
-    if (!trimmed) return DEFAULT_CONFIG.gopeed.host;
-    const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `http://${trimmed}`;
-    return withProtocol.replace(/\/+$/, "").replace(/\/api\/v1(?:\/tasks)?$/i, "");
 }
 
 function getDownloadUrl(item) {
@@ -418,21 +402,6 @@ async function isDownloadUrl(url) {
 }
 
 class GopeedDownloadManager {
-    constructor(config) {
-        this.config = config;
-        this.usedDeepLinkFallback = false;
-    }
-
-    isLocalHost() {
-        try {
-            const parsed = new URL(normalizeHost(this.config.host));
-            const hostname = parsed.hostname.toLowerCase();
-            return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "::1" || hostname === "[::1]";
-        } catch {
-            return false;
-        }
-    }
-
     createDeepLink(url, headers) {
         const cleanHeaders = {};
         if (headers && typeof headers === "object") {
@@ -451,82 +420,14 @@ class GopeedDownloadManager {
     }
 
     async bringToFront() {
-        if (this.usedDeepLinkFallback) return;
-        try {
-            await shell.openExternal("gopeed://");
-        } catch {
-            // Ignore foreground failures.
-        }
+        // The create-task link itself opens and focuses Gopeed.
     }
 
-    async postTaskApi(url, headers) {
-        const host = normalizeHost(this.config.host);
-        const token = typeof this.config.token === "string" ? this.config.token.trim() : "";
-
-        const cleanHeaders = {};
-        if (headers && typeof headers === "object") {
-            for (const [key, val] of Object.entries(headers)) {
-                if (typeof val === "string" && val.trim().length > 0) {
-                    cleanHeaders[key] = val.trim();
-                }
-            }
-        }
-
-        const req = {
-            url,
-            ...(Object.keys(cleanHeaders).length > 0 ? { extra: { header: cleanHeaders } } : {}),
-        };
-        const body = { req };
-
-        const response = await fetch(`${host}/api/v1/tasks`, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                ...(token ? { "X-Api-Token": token } : {}),
-            },
-            body: JSON.stringify(body),
-            signal: AbortSignal.timeout(8_000),
-        });
-
-        const bodyText = await response.text();
-        if (!response.ok) {
-            throw new Error(`Gopeed API returned HTTP ${response.status}: ${bodyText.slice(0, 300)}`);
-        }
-
-        const json = JSON.parse(bodyText);
-        if (json?.code !== 0) {
-            throw new Error(json?.msg ?? json?.message ?? "Unknown Gopeed API error");
-        }
-    }
-
-    async createTask(url, headers, filename) {
-        this.usedDeepLinkFallback = false;
-
-        try {
-            await this.postTaskApi(url, headers);
-            return;
-        } catch (apiError) {
-            if (this.isLocalHost()) {
-                try {
-                    await shell.openExternal("gopeed://");
-                } catch {
-                    // Ignore foreground / launch errors
-                }
-
-                await new Promise((resolve) => setTimeout(resolve, 1200));
-
-                try {
-                    await this.postTaskApi(url, headers);
-                    return;
-                } catch {
-                    this.usedDeepLinkFallback = true;
-                    const deepLink = this.createDeepLink(url, headers);
-                    await shell.openExternal(deepLink);
-                    return;
-                }
-            }
-            throw apiError;
-        }
+    async createTask(url, headers) {
+        // Gopeed's REST create endpoint starts immediately; its create link opens
+        // the task form so the user can review it first.
+        const deepLink = this.createDeepLink(url, headers);
+        await shell.openExternal(deepLink);
     }
 }
 
@@ -618,7 +519,7 @@ class IDMDownloadManager {
 }
 
 function createManager(config) {
-    if (config.manager === "gopeed") return new GopeedDownloadManager(config.gopeed);
+    if (config.manager === "gopeed") return new GopeedDownloadManager();
     if (config.manager === "idm") return new IDMDownloadManager();
     return null;
 }
@@ -646,7 +547,6 @@ export function activate(api) {
             return { ok: false, error: error instanceof Error ? error.message : "UNKNOWN" };
         }
     });
-
     const sessionListeners = new Map();
     const webContentsListeners = new Map();
     const bypassUrls = new Set();

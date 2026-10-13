@@ -2,8 +2,6 @@ const form = document.getElementById("settings-form");
 const managerSelect = document.getElementById("manager");
 const gopeedFields = document.getElementById("gopeed-fields");
 const idmNote = document.getElementById("idm-note");
-const hostInput = document.getElementById("gopeed-host");
-const tokenInput = document.getElementById("gopeed-token");
 const saveButton = document.getElementById("save");
 const status = document.getElementById("status");
 
@@ -27,7 +25,6 @@ form.addEventListener("submit", async (event) => {
     try {
         const result = await window.downloadManagerSettings.save({
             manager: managerSelect.value,
-            gopeed: { host: hostInput.value, token: tokenInput.value },
         });
         if (!result.ok) throw new Error(result.error || "Could not save settings");
         setStatus("Saved. Download routing is updated.");
@@ -44,8 +41,6 @@ async function loadSettings() {
         if (!result.ok) throw new Error(result.error || "Could not load settings");
         const config = result.config;
         managerSelect.value = config.manager;
-        hostInput.value = config.gopeed.host;
-        tokenInput.value = config.gopeed.token;
         updateFields();
     } catch (error) {
         setStatus(error.message || "Could not load settings.", true);

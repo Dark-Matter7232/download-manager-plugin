@@ -21,7 +21,7 @@ Author: [Anurag Rai (Dark-Matter7232)](https://github.com/Dark-Matter7232)
 | Manager | Compatibility | Description |
 | :--- | :--- | :--- |
 | **Browser** | All Platforms | Standard Legcord/Chromium download handler. |
-| **Gopeed** | Windows / macOS / Linux | Connects directly to Gopeed's REST API for fast, cross-platform downloads. |
+| **Gopeed** | Windows / macOS / Linux | Opens Gopeed's create-task window with the URL and request headers ready for review. |
 | **IDM** | Windows | Integrates directly with Internet Download Manager on Windows. |
 
 ---
@@ -61,17 +61,14 @@ plugin creates it there with default settings.
 
 ```json
 {
-    "manager": "gopeed",
-    "gopeed": {
-        "host": "http://127.0.0.1:9999",
-        "token": ""
-    }
+    "manager": "gopeed"
 }
 ```
 
 - **`manager`**: `"browser"`, `"gopeed"`, or `"idm"`
-- **`gopeed.host`**: Gopeed API server address (default: `http://127.0.0.1:9999`).
-- **`gopeed.token`**: Optional API token if authentication is enabled in Gopeed.
+
+Gopeed handoff uses its registered `gopeed:///create` link to open the task
+form for review. No Gopeed REST API setup is needed.
 
 ---
 
@@ -81,7 +78,7 @@ The plugin monitors download requests within Legcord. When a file link is clicke
 
 1. **Fast Match**: The link is checked against known file extensions and download query patterns.
 2. **Smart Inspection**: For ambiguous links, the plugin sends a fast header request to verify if the server returns a download payload (`Content-Disposition: attachment` or binary file type).
-3. **Handoff**: The file URL, current browser cookies, user agent, and page referrer are sent to your selected manager (Gopeed API or IDM helper).
+3. **Handoff**: The file URL, current browser cookies, user agent, and page referrer are passed to Gopeed's create-task window for review, or to the IDM helper.
 
 ---
 
@@ -103,7 +100,7 @@ The plugin automatically intercepts common download file types, including:
 
 - **Plugins menu is missing**: Ensure `Show experimental plugin menu` is turned on under `Settings -> Advanced`, then restart Legcord.
 - **Settings window did not open**: Go to **Settings → Plugins** and select **Reload** on the Download Manager plugin card.
-- **Gopeed not queuing downloads**: Verify Gopeed is open and the API host in plugin settings matches Gopeed (`http://127.0.0.1:9999`).
+- **Gopeed task window not opening**: Confirm Gopeed is installed and its `gopeed://` link handler is registered with the operating system.
 - **IDM not queuing downloads**: Confirm IDM is installed on Windows.
 
 ---
