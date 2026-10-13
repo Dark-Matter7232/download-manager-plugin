@@ -9,9 +9,9 @@ Author: [Anurag Rai (Dark-Matter7232)](https://github.com/Dark-Matter7232)
 ## 🌟 Features
 
 - **Seamless Interception**: Automatically catches file downloads from Discord chats, external link clicks, and popups.
-- **Protected Download Support**: Passes session cookies and headers so protected or private links download without authorization errors.
+- **Protected Download Support**: Passes the current browser cookies, user agent, and page referrer to the selected manager.
 - **Smart Link Detection**: Automatically detects files by extension (`.zip`, `.exe`, `.pdf`, `.mp4`, etc.) and download links (`?dl=1`, GitHub releases).
-- **Easy Settings UI**: Change backends on the fly using the built-in Download Manager pill or settings menu.
+- **Separate Settings Window**: Configure download routing in a plugin-owned window, outside the Discord page.
 - **Reliable Fallback**: If Gopeed or IDM is closed, downloads fall back safely to Legcord's default browser flow.
 
 ---
@@ -41,9 +41,8 @@ Author: [Anurag Rai (Dark-Matter7232)](https://github.com/Dark-Matter7232)
    - **Windows**: `%APPDATA%\legcord\plugins\download-manager-plugin`
    - **Linux**: `~/.config/legcord/plugins/download-manager-plugin`
    - **macOS**: `~/Library/Application Support/legcord/plugins/download-manager-plugin`
-3. Open Legcord and navigate to **Settings → Advanced**.
-4. Enable **Show experimental plugin menu** and **Extended plugin abilities**.
-5. Go to **Settings → Plugins**, enable **Download Manager Plugin**, and restart Legcord.
+3. Open Legcord, go to **Settings → Plugins**, and enable **Download Manager Plugin**.
+4. Select **Reload** on the plugin card to open its settings window.
 
 ---
 
@@ -51,18 +50,18 @@ Author: [Anurag Rai (Dark-Matter7232)](https://github.com/Dark-Matter7232)
 
 You can configure the plugin in two ways:
 
-### Via the In-App UI (Recommended)
-Click the **Download Manager** status pill at the top of Legcord to select your manager, enter your Gopeed API host/token (if applicable), and save.
+### Via the Settings Window (Recommended)
+Open **Settings → Plugins** and select **Reload** on the Download Manager plugin card. This opens the plugin's separate settings window. Saving applies the routing settings immediately.
 
-### Via `config.json`
-You can also edit `config.json` directly in the plugin directory:
+### Via the Runtime Settings File
+The plugin stores settings only at
+`<userData>/plugin-storage/download-manager-plugin/config.json`. This file in
+Legcord's plugin storage is the sole source of truth. If it does not exist, the
+plugin creates it there with default settings.
 
 ```json
 {
     "manager": "gopeed",
-    "ui": {
-        "showPill": true
-    },
     "gopeed": {
         "host": "http://127.0.0.1:9999",
         "token": ""
@@ -71,7 +70,6 @@ You can also edit `config.json` directly in the plugin directory:
 ```
 
 - **`manager`**: `"browser"`, `"gopeed"`, or `"idm"`
-- **`ui.showPill`**: `true` to display the status pill, or `false` to hide it.
 - **`gopeed.host`**: Gopeed API server address (default: `http://127.0.0.1:9999`).
 - **`gopeed.token`**: Optional API token if authentication is enabled in Gopeed.
 
@@ -83,7 +81,7 @@ The plugin monitors download requests within Legcord. When a file link is clicke
 
 1. **Fast Match**: The link is checked against known file extensions and download query patterns.
 2. **Smart Inspection**: For ambiguous links, the plugin sends a fast header request to verify if the server returns a download payload (`Content-Disposition: attachment` or binary file type).
-3. **Handoff**: The file URL, along with necessary browser session headers, is sent to your selected manager (Gopeed API or IDM helper).
+3. **Handoff**: The file URL, current browser cookies, user agent, and page referrer are sent to your selected manager (Gopeed API or IDM helper).
 
 ---
 
@@ -104,8 +102,7 @@ The plugin automatically intercepts common download file types, including:
 ## ❓ Troubleshooting
 
 - **Plugins menu is missing**: Ensure `Show experimental plugin menu` is turned on under `Settings -> Advanced`, then restart Legcord.
-- **Settings will not save**: Turn on `Extended plugin abilities` in Legcord's settings so the plugin has permission to write configuration.
-- **Pill disappeared**: Edit `config.json`, set `"showPill": true`, and reload Legcord.
+- **Settings window did not open**: Go to **Settings → Plugins** and select **Reload** on the Download Manager plugin card.
 - **Gopeed not queuing downloads**: Verify Gopeed is open and the API host in plugin settings matches Gopeed (`http://127.0.0.1:9999`).
 - **IDM not queuing downloads**: Confirm IDM is installed on Windows.
 

@@ -1,20 +1,25 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { shell } from "electron";
 
 const PLUGIN_ID = "download-manager-plugin";
+const SETTINGS_CHANNELS = {
+    get: `${PLUGIN_ID}:settings:get`,
+    save: `${PLUGIN_ID}:settings:save`,
+};
+const ACTIVATION_SEEN_KEY = Symbol.for(`${PLUGIN_ID}:activation-seen`);
+const OPEN_SETTINGS_AFTER_ACTIVATE = globalThis[ACTIVATION_SEEN_KEY] === true;
+globalThis[ACTIVATION_SEEN_KEY] = true;
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const bundledConfigPath = path.join(__dirname, "config.json");
+const SETTINGS_WINDOW_URL = path.join(__dirname, "settings.html");
+const SETTINGS_PRELOAD_PATH = path.join(__dirname, "settings-preload.cjs");
 const scriptsDir = path.join(__dirname, "scripts");
 
 const DEFAULT_CONFIG = {
     manager: "browser",
-    ui: {
-        showPill: true,
-    },
     gopeed: {
         host: "http://127.0.0.1:9999",
         token: "",
@@ -23,6 +28,57 @@ const DEFAULT_CONFIG = {
 
 function getStorageConfigPath(app) {
     return path.join(app.getPath("userData"), "plugin-storage", PLUGIN_ID, "config.json");
+}
+
+let settingsWindow = null;
+let settingsWindowCleanup = () => {};
+
+function openSettingsWindow(BrowserWindow) {
+    if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.show();
+        settingsWindow.focus();
+        return settingsWindow;
+    }
+
+    const window = new BrowserWindow({
+        width: 520,
+        height: 590,
+        minWidth: 460,
+        minHeight: 520,
+        title: "Download Manager Settings",
+        show: false,
+        autoHideMenuBar: true,
+        webPreferences: {
+            preload: SETTINGS_PRELOAD_PATH,
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+        },
+    });
+    settingsWindow = window;
+    window.setMenuBarVisibility(false);
+    const onReadyToShow = () => {
+        if (!window.isDestroyed()) window.show();
+    };
+    const onClosed = () => {
+        if (settingsWindow === window) {
+            settingsWindow = null;
+            settingsWindowCleanup = () => {};
+        }
+    };
+    window.once("ready-to-show", onReadyToShow);
+    window.once("closed", onClosed);
+    settingsWindowCleanup = () => {
+        window.removeListener("ready-to-show", onReadyToShow);
+        window.removeListener("closed", onClosed);
+        if (!window.isDestroyed()) window.close();
+        if (settingsWindow === window) settingsWindow = null;
+        settingsWindowCleanup = () => {};
+    };
+    void window.loadFile(SETTINGS_WINDOW_URL).catch((error) => {
+        console.error(`[Plugin:${PLUGIN_ID}] Failed to load settings window`, error);
+    });
+    return window;
 }
 
 function ensureParentDir(filePath) {
@@ -47,9 +103,6 @@ function writeJsonIfChanged(filePath, value) {
 function normalizeConfig(parsed) {
     return {
         manager: parsed?.manager === "gopeed" || parsed?.manager === "idm" ? parsed.manager : "browser",
-        ui: {
-            showPill: parsed?.ui?.showPill === true,
-        },
         gopeed: {
             host:
                 typeof parsed?.gopeed?.host === "string" && parsed.gopeed.host.trim().length > 0
@@ -62,35 +115,11 @@ function normalizeConfig(parsed) {
 
 function ensureConfig(app, logger) {
     const storageConfigPath = getStorageConfigPath(app);
-    if (!existsSync(storageConfigPath)) {
-        ensureParentDir(storageConfigPath);
-        const seedConfig = existsSync(bundledConfigPath) ? readJson(bundledConfigPath) : DEFAULT_CONFIG;
-        writeJsonIfChanged(storageConfigPath, normalizeConfig(seedConfig));
-        logger.log("Created plugin storage config.json");
-    }
+    if (existsSync(storageConfigPath)) return storageConfigPath;
 
-    // The renderer can only access plugin storage, so keep it synchronized with
-    // the bundled config. The file changed most recently is the source.
-    try {
-        const bundledConfig = existsSync(bundledConfigPath) ? readJson(bundledConfigPath) : DEFAULT_CONFIG;
-        const storedConfig = readJson(storageConfigPath);
-        const bundledIsNewer = statSync(bundledConfigPath).mtimeMs >= statSync(storageConfigPath).mtimeMs;
-        const sourceConfig = bundledIsNewer ? bundledConfig : storedConfig;
-        const normalizedConfig = normalizeConfig(sourceConfig);
-        const destinationPath = bundledIsNewer ? storageConfigPath : bundledConfigPath;
-        if (writeJsonIfChanged(destinationPath, normalizedConfig)) {
-            logger.log("Synchronized plugin config files");
-        }
-    } catch (error) {
-        logger.error("Failed to synchronize plugin config files", error);
-        try {
-            const seedConfig = existsSync(bundledConfigPath) ? readJson(bundledConfigPath) : DEFAULT_CONFIG;
-            writeJsonIfChanged(storageConfigPath, normalizeConfig(seedConfig));
-            logger.log("Repaired invalid plugin storage config.json");
-        } catch (repairError) {
-            logger.error("Failed to repair plugin storage config.json", repairError);
-        }
-    }
+    ensureParentDir(storageConfigPath);
+    writeJsonIfChanged(storageConfigPath, structuredClone(DEFAULT_CONFIG));
+    logger.log("Created default settings in Legcord plugin storage");
 
     return storageConfigPath;
 }
@@ -112,8 +141,14 @@ function readConfig(app, logger) {
         configCacheTime = now;
         return config;
     } catch (error) {
-        logger.error("Failed to read config.json, using defaults", error);
-        return structuredClone(DEFAULT_CONFIG);
+        logger.error("Failed to read plugin storage settings, using defaults", error);
+        const defaults = structuredClone(DEFAULT_CONFIG);
+        try {
+            writeJsonIfChanged(storageConfigPath, defaults);
+        } catch (repairError) {
+            logger.error("Failed to repair plugin storage config.json", repairError);
+        }
+        return defaults;
     }
 }
 
@@ -137,18 +172,6 @@ function isHttpUrl(url) {
     return typeof url === "string" && /^https?:\/\//i.test(url);
 }
 
-const requestHeadersCache = new Map();
-
-function trackRequestHeaders(url, headers) {
-    if (url && headers) {
-        requestHeadersCache.set(url, headers);
-        if (requestHeadersCache.size > 512) {
-            const oldest = requestHeadersCache.keys().next().value;
-            if (oldest) requestHeadersCache.delete(oldest);
-        }
-    }
-}
-
 async function buildDownloadRequestHeaders(window, url) {
     const headers = {};
     const webContents = window?.webContents;
@@ -168,16 +191,6 @@ async function buildDownloadRequestHeaders(window, url) {
         }
     } catch {
         // Ignore Referer collection failures.
-    }
-
-    // Merge live captured request headers if available
-    const tracked = requestHeadersCache.get(url);
-    if (tracked) {
-        for (const [key, val] of Object.entries(tracked)) {
-            if (typeof val === "string" && val.length > 0 && !headers[key]) {
-                headers[key] = val;
-            }
-        }
     }
 
     try {
@@ -613,6 +626,27 @@ function createManager(config) {
 export function activate(api) {
     ensureConfig(api.electron.app, api.logger);
 
+    const ipcMain = api.electron.ipcMain;
+    const isSettingsWindow = (event) => settingsWindow && event.sender === settingsWindow.webContents;
+    ipcMain.handle(SETTINGS_CHANNELS.get, (event) => {
+        if (!isSettingsWindow(event)) return { ok: false, error: "UNAUTHORIZED" };
+        return { ok: true, config: readConfig(api.electron.app, api.logger) };
+    });
+    ipcMain.handle(SETTINGS_CHANNELS.save, (event, value) => {
+        if (!isSettingsWindow(event)) return { ok: false, error: "UNAUTHORIZED" };
+        try {
+            const config = normalizeConfig(value);
+            const configPath = ensureConfig(api.electron.app, api.logger);
+            writeJsonIfChanged(configPath, config);
+            configCache = config;
+            configCacheTime = Date.now();
+            return { ok: true };
+        } catch (error) {
+            api.logger.error("Failed to save plugin settings", error);
+            return { ok: false, error: error instanceof Error ? error.message : "UNKNOWN" };
+        }
+    });
+
     const sessionListeners = new Map();
     const webContentsListeners = new Map();
     const bypassUrls = new Set();
@@ -630,6 +664,7 @@ export function activate(api) {
     };
 
     const attachWindow = (window) => {
+        if (window === settingsWindow) return;
         const webContents = window?.webContents;
         if (!webContents) return;
 
@@ -683,17 +718,6 @@ export function activate(api) {
                 })();
             };
 
-            try {
-                session.webRequest.onBeforeSendHeaders({ urls: ["http://*/*", "https://*/*"] }, (details, callback) => {
-                    if (details.url && details.requestHeaders) {
-                        trackRequestHeaders(details.url, details.requestHeaders);
-                    }
-                    callback({ cancel: false, requestHeaders: details.requestHeaders });
-                });
-            } catch {
-                // Best-effort webRequest header tracking
-            }
-
             session.on("will-download", downloadListener);
             sessionListeners.set(session, downloadListener);
         }
@@ -741,47 +765,14 @@ export function activate(api) {
 
             const navigateListener = (event, url) => handleNavOrRedirect(event, url, "navigated");
             const redirectListener = (event, url) => handleNavOrRedirect(event, url, "redirected");
-
-            try {
-                webContents.setWindowOpenHandler(({ url }) => {
-                    if (isHttpUrl(url)) {
-                        const config = readConfig(api.electron.app, api.logger);
-                        if (config.manager !== "browser" && isDownloadUrlSync(url)) {
-                            void (async () => {
-                                try {
-                                    const manager = createManager(config);
-                                    if (manager) {
-                                        const headers = await buildDownloadRequestHeaders(window, url);
-                                        const filename = extractFilenameFromUrl(url);
-                                        await manager.createTask(url, headers, filename);
-                                        await manager.bringToFront();
-                                        api.logger.log(`Queued window.open download through ${config.manager}:`, url);
-                                        return;
-                                    }
-                                } catch (error) {
-                                    api.logger.error("Failed to queue window.open download", error);
-                                }
-                                try {
-                                    await originalOpenExternal(url);
-                                } catch (shellError) {
-                                    api.logger.error("Fallback window.open openExternal failed", shellError);
-                                }
-                            })();
-                            return { action: "deny" };
-                        }
-                    }
-                    return { action: "allow" };
-                });
-            } catch {
-                // Best-effort setWindowOpenHandler
-            }
+            const destroyedListener = () => {
+                webContentsListeners.delete(webContents);
+            };
 
             webContents.on("will-navigate", navigateListener);
             webContents.on("will-redirect", redirectListener);
-            webContentsListeners.set(webContents, { navigateListener, redirectListener });
-            webContents.once("destroyed", () => {
-                webContentsListeners.delete(webContents);
-            });
+            webContents.once("destroyed", destroyedListener);
+            webContentsListeners.set(webContents, { navigateListener, redirectListener, destroyedListener });
         }
     };
 
@@ -842,6 +833,9 @@ export function activate(api) {
 
     api.electron.app.on("browser-window-created", onWindowCreated);
     api.onCleanup(() => {
+        ipcMain.removeHandler(SETTINGS_CHANNELS.get);
+        ipcMain.removeHandler(SETTINGS_CHANNELS.save);
+        settingsWindowCleanup();
         unpatchShell();
         api.electron.app.off("browser-window-created", onWindowCreated);
         for (const [session, listener] of sessionListeners) {
@@ -852,13 +846,17 @@ export function activate(api) {
             if (!webContents.isDestroyed()) {
                 if (listeners?.navigateListener) webContents.off("will-navigate", listeners.navigateListener);
                 if (listeners?.redirectListener) webContents.off("will-redirect", listeners.redirectListener);
+                if (listeners?.destroyedListener) webContents.off("destroyed", listeners.destroyedListener);
             }
         }
         webContentsListeners.clear();
-        requestHeadersCache.clear();
         downloadDecisionCache.clear();
         configCache = null;
     });
+
+    if (OPEN_SETTINGS_AFTER_ACTIVATE) {
+        openSettingsWindow(api.electron.BrowserWindow);
+    }
 }
 
 export { isDownloadUrlSync, isDownloadUrl, extractFilenameFromUrl };

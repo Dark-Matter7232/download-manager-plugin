@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'" />
+        <title>Download Manager Settings</title>
+        <link rel="stylesheet" href="settings.css" />
+    </head>
+    <body>
+        <main class="card">
+            <header>
+                <div class="eyebrow">LEGCORD PLUGIN</div>
+                <h1>Download Manager</h1>
+                <p>Choose where Legcord sends download links.</p>
+            </header>
+
+            <form id="settings-form">
+                <label class="field" for="manager">
+                    <span>Download destination</span>
+                    <select id="manager" name="manager">
+                        <option value="browser">Legcord / browser</option>
+                        <option value="gopeed">Gopeed</option>
+                        <option value="idm">Internet Download Manager</option>
+                    </select>
+                </label>
+
+                <section id="gopeed-fields" class="subsection" hidden>
+                    <label class="field" for="gopeed-host">
+                        <span>Gopeed API address</span>
+                        <input id="gopeed-host" name="host" type="url" placeholder="http://127.0.0.1:9999" />
+                    </label>
+                    <label class="field" for="gopeed-token">
+                        <span>API token <small>(optional)</small></span>
+                        <input id="gopeed-token" name="token" type="password" autocomplete="off" />
+                    </label>
+                </section>
+
+                <p id="idm-note" class="note" hidden>IDM routing is available on Windows.</p>
+                <div class="actions">
+                    <button id="close" class="secondary" type="button">Close</button>
+                    <button id="save" class="primary" type="submit">Save settings</button>
+                </div>
+                <p id="status" class="status" role="status" aria-live="polite"></p>
+            </form>
+        </main>
+        <script src="settings-window.js"></script>
+    </body>
+</html>
